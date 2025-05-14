@@ -1,0 +1,12 @@
+{
+  "name": "facebook-bot-2g",
+  "version": "1.0.0",
+  "description": "بوت فيسبوك لتفعيل عرض 2G جيزي",
+  "main": "facebook_bot.py",
+  "scripts": {
+    "start": "python facebook_bot.py"
+  },
+  "engines": {
+    "python": "3.10"
+  }
+}

@@ -1,23 +1,43 @@
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask, request
 import requests
-import json
+import os
 
-# ضع هنا توكن البوت الذي حصلت عليه من BotFather
-TOKEN = "token"
+app = Flask(__name__)
 
-# الوظيفة الرئيسية لطلب رقم الهاتف
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("مرحبًا! أرسل رقمك الذي يبدأ بـ07 لتفعيل عرض 2G جيزي.")
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "your_verify_token")
+PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN", "your_page_token")
 
-# وظيفة للتحقق من الرقم المرسل وبدء عملية OTP
-async def handle_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    num = update.message.text.strip()
-    if len(num) == 10 and num.startswith("07") and num.isdigit():
-        await update.message.reply_text("جاري إرسال كود التفعيل، انتظر...")
-        
-        # إعداد البيانات لطلب الكود OTP
-        data = f'msisdn=213{num}&client_id=6E6CwTkp8H1CyQxraPmcEJPQ7xka&scope=smsotp'
+# لتخزين أرقام المستخدمين مؤقتاً (في الذاكرة فقط)
+sessions = {}
+
+@app.route("/", methods=["GET"])
+def verify():
+    if request.args.get("hub.mode") == "subscribe" and request.args.get("hub.verify_token") == VERIFY_TOKEN:
+        return request.args.get("hub.challenge")
+    return "Verification failed", 403
+
+@app.route("/", methods=["POST"])
+def webhook():
+    data = request.get_json()
+
+    if data["object"] == "page":
+        for entry in data["entry"]:
+            for messaging_event in entry["messaging"]:
+                sender_id = messaging_event["sender"]["id"]
+                if messaging_event.get("message"):
+                    msg = messaging_event["message"].get("text", "")
+                    handle_message(sender_id, msg)
+
+    return "ok", 200
+
+def handle_message(sender_id, msg):
+    msg = msg.strip()
+    
+    # حالة رقم الهاتف
+    if len(msg) == 10 and msg.startswith("07") and msg.isdigit():
+        send_message(sender_id, "جاري إرسال كود التفعيل، انتظر...")
+        full_number = f"213{msg}"
+        data = f'msisdn={full_number}&client_id=6E6CwTkp8H1CyQxraPmcEJPQ7xka&scope=smsotp'
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
             "Content-Length": str(len(data)),
@@ -27,29 +47,19 @@ async def handle_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "User-Agent": "Djezzy/2.6.6",
             "Accept": "*/*"
         }
-        
-        # إرسال الطلب للحصول على OTP
         res = requests.post('https://apim.djezzy.dz/oauth2/registration', data=data, headers=headers).text
-        if 'the confirmation code has been sent successfully' in res:
-            await update.message.reply_text("تم إرسال الكود بنجاح. أرسل الكود الآن.")
-            
-            # حفظ الرقم في السياق لاستخدامه لاحقاً
-            context.user_data["num"] = num
+        if 'confirmation code has been sent successfully' in res:
+            send_message(sender_id, "✅ تم إرسال الكود. أرسل الكود الآن.")
+            sessions[sender_id] = full_number
         else:
-            await update.message.reply_text("فشل في إرسال كود OTP، حاول مرة أخرى.")
-    else:
-        await update.message.reply_text("يرجى إرسال رقم صحيح يبدأ بـ07 ويتكون من 10 أرقام.")
-
-# وظيفة لمعالجة كود OTP والتحقق منه
-async def handle_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    otp = update.message.text.strip()
-    num = context.user_data.get("num")
+            send_message(sender_id, "❌ فشل في إرسال كود OTP، حاول مرة أخرى.")
     
-    if num and otp.isdigit():
-        await update.message.reply_text("جاري التحقق من الكود وتفعيل العرض...")
-        
-        # إعداد البيانات لطلب الحصول على التوكن
-        data2 = f'otp={otp}&mobileNumber=213{num}&scope=openid&client_id=6E6CwTkp8H1CyQxraPmcEJPQ7xka&client_secret=MVpXHW_ImuMsxKIwrJpoVVMHjRsa&grant_type=mobile'
+    # حالة الكود
+    elif msg.isdigit() and 4 <= len(msg) <= 6 and sender_id in sessions:
+        send_message(sender_id, "جاري التحقق من الكود وتفعيل العرض...")
+        number = sessions[sender_id]
+        otp = msg
+        data2 = f'otp={otp}&mobileNumber={number}&scope=openid&client_id=6E6CwTkp8H1CyQxraPmcEJPQ7xka&client_secret=MVpXHW_ImuMsxKIwrJpoVVMHjRsa&grant_type=mobile'
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
             "Content-Length": str(len(data2)),
@@ -59,11 +69,7 @@ async def handle_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "User-Agent": "Djezzy/2.6.6",
             "Accept": "*/*"
         }
-        
-        # إرسال الطلب للحصول على التوكن
         res2 = requests.post('https://apim.djezzy.dz/oauth2/token', data=data2, headers=headers).json()
-        
-        # التحقق من الحصول على التوكن
         try:
             token = res2['access_token']
             json_data = {
@@ -79,9 +85,7 @@ async def handle_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     }
                 }
             }
-            
-            # إعدادات الطلب لتفعيل العرض
-            subscription_headers = {
+            sub_headers = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json; charset=utf-8",
                 "Host": "apim.djezzy.dz",
@@ -90,33 +94,24 @@ async def handle_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "User-Agent": "Djezzy/2.6.6",
                 "Accept": "*/*"
             }
-            
-            # إرسال الطلب لتفعيل العرض
-            res = requests.post(f'https://apim.djezzy.dz/djezzy-api/api/v1/subscribers/213{num}/subscription-product?include=', json=json_data, headers=subscription_headers).text
+            res = requests.post(f'https://apim.djezzy.dz/djezzy-api/api/v1/subscribers/{number}/subscription-product?include=', json=json_data, headers=sub_headers).text
             if 'successfully done' in res:
-                await update.message.reply_text("تم تفعيل عرض 2G بنجاح!")
+                send_message(sender_id, "✅ تم تفعيل عرض 2G بنجاح!")
             else:
-                await update.message.reply_text("فشل في تفعيل العرض. حاول مرة أخرى.")
-                
+                send_message(sender_id, "❌ فشل في تفعيل العرض.")
         except KeyError:
-            await update.message.reply_text("الكود المدخل غير صحيح. حاول مرة أخرى.")
+            send_message(sender_id, "❌ الكود غير صحيح أو منتهي.")
+    
     else:
-        await update.message.reply_text("يرجى إرسال الكود الصحيح.")
+        send_message(sender_id, "👋 أهلاً! أرسل رقمك الذي يبدأ بـ07 لتفعيل عرض 2G.")
 
-# إعداد البوت وتحديد الأوامر
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    
-    # إضافة أوامر البداية
-    app.add_handler(CommandHandler("start", start))
-    
-    # إضافة معالجات الرسائل
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^07\d{8}$'), handle_number))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^\d{4,6}$'), handle_otp))
-    
-    # تشغيل البوت
-    print("Bot is running...")
-    app.run_polling()
+def send_message(recipient_id, text):
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": text}
+    }
+    params = {"access_token": PAGE_ACCESS_TOKEN}
+    requests.post("https://graph.facebook.com/v18.0/me/messages", params=params, json=payload)
 
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
